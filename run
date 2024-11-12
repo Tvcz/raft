@@ -6,7 +6,7 @@ import string, hashlib, bisect, atexit, getpass, argparse, functools
 VERSION = "2"
 
 ALL_TESTS = 'all'
-REPLICA_PROG = './3700kvstore'
+REPLICA_PROG = './4730kvstore'
 NUM_CLIENTS = 8
 
 RECV_WAIT = 0.1
@@ -405,13 +405,14 @@ class Replica:
 
             self.alive = True
         except:
-            fail('*** Simulator Error - Unable to execute ./3700kvstore')
+            fail('*** Simulator Error - Unable to execute ./4730kvstore')
             self.alive = False
         
     def shutdown(self):
         if self.alive:
             self.alive = False
             self.socket.close()
+            self.fds = []
             self.socket = None
             # Kill the process group assigned to the raft replica
             os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
@@ -518,11 +519,11 @@ class Simulation:
                 for r in self.replicas.values():
                     # If it is a network socket, route the packets
                     if r.socket == sock:
-                        self.__route_msgs__(sock)
+                        self.__route_msgs__(r, sock)
 
                     # Otherwise its a output socket
-                    if sock in r.fds:
-                        self.__print_output(sock, start)
+                    elif sock in r.fds:
+                        self.__print_output__(r, sock, start)
 
             # check the time and fire off events
             clock = time.time()
@@ -577,7 +578,7 @@ class Simulation:
             self.leader = 'FFFF'
             for client in self.clients.values(): client.forget()
                         
-        for i in range(qsize):
+        for _ in range(qsize):
             rid = random.choice(r)
             self.partition.add(rid)
             r.remove(rid)
@@ -646,37 +647,35 @@ class Simulation:
             return False
         return True
 
-    def __print_output(self, sock, start):
-        for r in self.replicas.values():
-            if sock in r.fds:
-                msg = sock.read(1500).decode('utf-8')
-                if len(msg) > 0:
-                    for line in msg.strip().split("\n"):
-                        print("[%02.4f  Replica %s]: %s" % (time.time() - start, r.rid, line))
-                else:
-                    print("Replica %s crashed; closing sockets" % r.rid)
-                    r.fds = []
+    def __print_output__(self, r, sock, start):
+        msg = sock.read(1500).decode('utf-8')
+        if len(msg) > 0:
+            for line in msg.strip().split("\n"):
+                print("[%02.4f  Replica %s]: %s" % (time.time() - start, r.rid, line))
+        else:
+            print("Replica %s crashed; closing sockets" % r.rid)
+            self.__close_replica__(r)
 
-    def __route_msgs__(self, sock):
+    def __route_msgs__(self, r, sock):
 
         try:
             buf, addr = sock.recvfrom(65535)
         except: 
             warn("*** Simulator Error - A replica quit unexpectedly")
-            self.__close_replica__(sock)
+            self.__close_replica__(r)
             return
             
         # is this sock shutting down?
         if len(buf) == 0:
             warn("*** Simulator Error - Replica shut down a socket unexpectedly")
-            self.__close_replica__(sock)
+            self.__close_replica__(r)
             return
 
         try:
             raw_msg = buf.decode()
         except:
             warn("*** Simulator Error - Could not decode message from replica, it may contain non-ASCII data")
-            self.__close_replica__(sock)
+            self.__close_replica__(r)
             return
                         
         # decode and validate the message
@@ -710,9 +709,7 @@ class Simulation:
         
         # if it's a hello message, use it to grab the remote port
         if msg['type'] == "hello":
-            for r in self.replicas.values():
-                if sock == r.socket:
-                    r.remote_port = addr[1]
+            r.remote_port = addr[1]
             return
 
         # record the id of the current leader
@@ -747,13 +744,10 @@ class Simulation:
             warn(f"*** Simulator Error - Unknown destination: {raw_msg}")
             self.stats.incorrect += 1
             
-    def __close_replica__(self, sock):
-        for r in self.replicas.values():
-            if r.socket == sock:
-                if r.rid in self.living_rids:
-                    self.living_rids.remove(r.rid)
-                    r.shutdown()
-                break
+    def __close_replica__(self, r):
+        if r.rid in self.living_rids:
+            self.living_rids.remove(r.rid)
+            r.shutdown()
 
     def correctness_check(self, ignore=[], verbose=True):
         passed = True
@@ -928,7 +922,7 @@ if __name__ == "__main__":
     parser.add_argument("--replica",
                         "-r",
                         type=str,
-                        default='./3700kvstore',
+                        default='./4730kvstore',
                         help=f'Fully qualified path to your replica program (Default: {REPLICA_PROG})')
     parser.add_argument("--silence",
                         "-s",
