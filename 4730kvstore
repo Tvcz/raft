@@ -6,6 +6,14 @@ BROADCAST = "FFFF"
 LEADER_TIMEOUT_LENGTH = 1
 ELECTION_TIMEOUT_LENGTH = 1
 
+if os.path.exists("log.txt"):
+    os.remove("log.txt")
+
+def log(message):
+    with open("log.txt", "a+") as f:
+        # f.write(f"{message}\n")
+        pass
+
 class Command:
     def apply(self, state_machine: dict):
         pass
@@ -75,7 +83,7 @@ class Replica:
             if self.voted_for is None and time.time() - self.last_heartbeat > LEADER_TIMEOUT_LENGTH:
                 self.current_term += 1
                 self.start_election()
-            if self.leader is None and time.time() - self.election_start > ELECTION_TIMEOUT_LENGTH:
+            if self.voted_for == self.id and time.time() - self.election_start > ELECTION_TIMEOUT_LENGTH:
                 self.start_election()
                 
     def send(self, message):
@@ -106,6 +114,9 @@ class Replica:
     def handle_get(self, msg):
         try:
             key = msg["key"]
+            self.state_machine = {}
+            for term, command in self.log:
+                command.apply(self.state_machine)
             value = GetCommand(key).apply(self.state_machine)
             response = self.build_response(msg, "ok", value=value)
             self.send(response)
@@ -132,7 +143,7 @@ class Replica:
         response = {
             "src": self.id,
             "dst": msg["src"],
-            "leader": self.leader,
+            "leader": self.leader if self.leader is not None else BROADCAST,
             "type": type,
         }
         if "MID" in msg:
@@ -144,7 +155,7 @@ class Replica:
         vote_request = {
             "src": self.id,
             "dst": BROADCAST,
-            "leader": "FFFF",
+            "leader": BROADCAST,
             "candidate_id": self.id,
             "type": "vote_request",
             "term": self.current_term,
@@ -152,6 +163,7 @@ class Replica:
             "last_log_term": self.get_last_log_term()
         }
         self.send(vote_request)
+        log(f"Replica {self.id} sent vote request.")
         print(f"Sent vote request: {vote_request}")
         
     def get_last_log_term(self):
@@ -176,20 +188,26 @@ class Replica:
         self.last_heartbeat = time.time()
         self.election_start = None
         self.respond_grant_vote(msg)
+        log(f"Replica {self.id} voted for {msg['candidate_id']}")
             
     def respond_grant_vote(self, msg: dict):
         vote_response = self.build_response(msg, "vote_response", term=self.current_term, vote_granted=True)
+        self.send(vote_response)
         print(f"Sent vote response: {vote_response}")
             
     def respond_not_grant_vote(self, msg: dict):
         vote_response = self.build_response(msg, "vote_response", term=self.current_term, vote_granted=False)
+        self.send(vote_response)
         print(f"Sent vote response: {vote_response}")
         
     def handle_vote_response(self, msg: dict):
+        log(f"Replica {self.id} received vote response from {msg['src']}")
         if msg["vote_granted"]:
             self.received_votes += 1
+            log(f"Replica {self.id} received vote. Current votes: {self.received_votes}")
             if self.received_votes > (len(self.others) / 2.0):
                 self.leader = self.id
+                self.voted_for = None
                 self.election_start = None
                 self.received_votes = 0
                 self.send_heartbeat()
@@ -207,7 +225,7 @@ class Replica:
             "type": "append_entries",
             "term": self.current_term,
             "prev_log_index": len(self.log) - 1,
-            "prev_log_term": self.log[-1][0] if len(self.log) > 0 else 0,
+            "prev_log_term": self.get_last_log_term(),
             "leader_commit": self.commitIndex,
             "entries": self.log_to_entries(self.log)
         }
@@ -220,6 +238,7 @@ class Replica:
             self.current_term = msg["term"]
             self.leader = msg["leader"]
             self.last_heartbeat = time.time()
+            self.voted_for = None
             self.election_start = None
             if self.is_log_consistent(msg):
                 self.update_log_and_state_machine(msg)
@@ -232,7 +251,7 @@ class Replica:
             self.send_append_entries_failure(msg)
 
     def is_log_consistent(self, msg: dict) -> bool:
-        return msg["prev_log_index"] < len(self.log) and self.log[msg["prev_log_index"]][0] == msg["prev_log_term"]
+        return msg["prev_log_index"] < len(self.log) and self.get_last_log_term() == msg["prev_log_term"]
 
     def update_log_and_state_machine(self, msg: dict):
         self.log = self.entries_to_log(msg["entries"])
