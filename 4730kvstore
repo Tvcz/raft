@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+
+import argparse, socket, time, json, select, struct, sys, math, os
+
+BROADCAST = "FFFF"
+LEADER_TIMEOUT_LENGTH = 1
+ELECTION_TIMEOUT_LENGTH = 1
+
+class Command:
+    def apply(self, state_machine: dict):
+        pass
+
+    def serialize(self) -> list[str]:
+        return ""
+    
+class GetCommand(Command):
+    def __init__(self, key: str):
+        self.key = key
+    
+    def apply(self, state_machine: dict):
+        return state_machine.get(self.key, None)
+    
+    def serialize(self) -> list[str]:
+        return ["GET", self.key]
+    
+class PutCommand(Command):
+    def __init__(self, key: str, value: str):
+        self.key = key
+        self.value = value
+    
+    def apply(self, state_machine: dict):
+        state_machine[self.key] = self.value
+        return None
+    
+    def serialize(self) -> list[str]:
+        return ["PUT", self.key, self.value]
+    
+class Replica:
+    current_term = 0
+    log: list[tuple[int, Command]] = []
+    leader = None
+    state_machine = {}
+    last_heartbeat = 0
+    voted_for = None
+    election_start = None
+    received_votes = 0
+    commitIndex = 0
+    lastApplied = 0
+    
+    def __init__(self, port: str, id: str, others: list[str]):
+        self.port = port
+        self.id = id
+        self.others = others
+
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind(('localhost', 0))
+
+        print(f"Replica {self.id} starting up")
+        hello = { "src": self.id, "dst": BROADCAST, "leader": BROADCAST, "type": "hello" }
+        self.send(hello)
+        print(f"Sent hello message: {hello}")
+    
+    def run(self):
+        while True:
+            readable_sockets: tuple[socket.socket] = select.select([self.socket], [], [], 1)[0]
+            if self.socket in readable_sockets:
+                data: bytes = self.socket.recvfrom(65535)[0]
+                msg = json.loads(data.decode('utf-8'))
+
+                print(f"Received message '{msg}'")
+                if msg["type"] in ["get", "put", "vote_request", "vote_response", "append_entries", "append_entries_response"]:
+                    self.handle_message(msg)
+            if self.leader == self.id and time.time() - self.last_heartbeat > .3:
+                self.send_heartbeat()
+            if self.voted_for is None and time.time() - self.last_heartbeat > LEADER_TIMEOUT_LENGTH:
+                self.current_term += 1
+                self.start_election()
+            if self.leader is None and time.time() - self.election_start > ELECTION_TIMEOUT_LENGTH:
+                self.start_election()
+                
+    def send(self, message):
+        self.socket.sendto(json.dumps(message).encode('utf-8'), ('localhost', self.port))
+
+    def handle_message(self, msg):
+        if msg["type"] == "vote_request":
+            self.handle_request_vote(msg)
+        elif msg["type"] == "vote_response":
+            self.handle_vote_response(msg)
+        elif msg["type"] == "append_entries":
+            self.handle_append_entries(msg)
+        elif msg["type"] == "append_entries_response":
+            pass
+        elif self.leader == self.id:
+            if msg["type"] == "get":
+                response = self.handle_get(msg)
+            elif msg["type"] == "put":
+                response = self.handle_put(msg)
+            else:
+                raise RuntimeError(f"Unknown message type: {msg['type']}")
+        else:
+            response = self.build_response(msg, "redirect")
+            self.send(response)
+            print(f"Sent redirect response: {response}")
+            return
+        
+    def handle_get(self, msg):
+        try:
+            key = msg["key"]
+            value = GetCommand(key).apply(self.state_machine)
+            response = self.build_response(msg, "ok", value=value)
+            self.send(response)
+            print(f"Sent get response: {response}")
+        except Exception as e:
+            response = self.build_response(msg, "fail")
+            self.send(response)
+            print(f"FAILED: {response}")
+        
+    def handle_put(self, msg):
+        try:
+            key = msg["key"]
+            value = msg["value"]
+            self.log.append((self.current_term, PutCommand(key, value)))
+            response = self.build_response(msg, "ok")
+            self.send(response)
+            print(f"Sent put response: {response}")
+        except Exception as e:
+            response = self.build_response(msg, "fail")
+            self.send(response)
+            print(f"FAILED: {response}")
+    
+    def build_response(self, msg: dict, type: str, **kwargs):
+        response = {
+            "src": self.id,
+            "dst": msg["src"],
+            "leader": self.leader,
+            "type": type,
+        }
+        if "MID" in msg:
+            response["MID"] = msg["MID"]
+        response.update(kwargs)
+        return response
+        
+    def request_vote(self):
+        vote_request = {
+            "src": self.id,
+            "dst": BROADCAST,
+            "leader": "FFFF",
+            "candidate_id": self.id,
+            "type": "vote_request",
+            "term": self.current_term,
+            "last_log_index": len(self.log),
+            "last_log_term": self.get_last_log_term()
+        }
+        self.send(vote_request)
+        print(f"Sent vote request: {vote_request}")
+        
+    def get_last_log_term(self):
+        return self.log[-1][0] if len(self.log) > 0 else 0
+    
+    def handle_request_vote(self, msg: dict):
+        # If request is from an old term, vote against
+        if msg["term"] < self.current_term:
+            self.respond_not_grant_vote(msg)
+            return
+        # If already voted for someone else, vote against
+        if self.voted_for is not None and self.voted_for != msg["candidate_id"]:
+            self.respond_not_grant_vote(msg)
+            return
+        # If candidate's log is not up to date, vote against
+        if (msg["last_log_term"] < self.get_last_log_term()) or \
+           (msg["last_log_term"] == self.get_last_log_term() and msg["last_log_index"] < len(self.log)):
+            self.respond_not_grant_vote(msg)
+            return
+        # Otherwise, vote for the candidate
+        self.voted_for = msg["candidate_id"]
+        self.last_heartbeat = time.time()
+        self.election_start = None
+        self.respond_grant_vote(msg)
+            
+    def respond_grant_vote(self, msg: dict):
+        vote_response = self.build_response(msg, "vote_response", term=self.current_term, vote_granted=True)
+        print(f"Sent vote response: {vote_response}")
+            
+    def respond_not_grant_vote(self, msg: dict):
+        vote_response = self.build_response(msg, "vote_response", term=self.current_term, vote_granted=False)
+        print(f"Sent vote response: {vote_response}")
+        
+    def handle_vote_response(self, msg: dict):
+        if msg["vote_granted"]:
+            self.received_votes += 1
+            if self.received_votes > (len(self.others) / 2.0):
+                self.leader = self.id
+                self.election_start = None
+                self.received_votes = 0
+                self.send_heartbeat()
+                print(f"Replica {self.id} is now the leader")
+        else:
+            if msg["term"] > self.current_term:
+                self.current_term = msg["term"]
+                self.election_start = None
+            
+    def send_heartbeat(self):
+        request = {
+            "src": self.id,
+            "dst": BROADCAST,
+            "leader": self.id,
+            "type": "append_entries",
+            "term": self.current_term,
+            "prev_log_index": len(self.log) - 1,
+            "prev_log_term": self.log[-1][0] if len(self.log) > 0 else 0,
+            "leader_commit": self.commitIndex,
+            "entries": self.log_to_entries(self.log)
+        }
+        self.last_heartbeat = time.time()
+        self.send(request)
+        print(f"Sent heartbeat: {request}")
+    
+    def handle_append_entries(self, msg: dict):
+        if msg["term"] >= self.current_term:
+            self.current_term = msg["term"]
+            self.leader = msg["leader"]
+            self.last_heartbeat = time.time()
+            self.election_start = None
+            if self.is_log_consistent(msg):
+                self.update_log_and_state_machine(msg)
+                response = self.build_response(msg, "append_entries_response", term=self.current_term, success=True)
+                self.send(response)
+                print(f"Append entries succeeded: {response}")
+            else:
+                self.send_append_entries_failure(msg)
+        else:
+            self.send_append_entries_failure(msg)
+
+    def is_log_consistent(self, msg: dict) -> bool:
+        return msg["prev_log_index"] < len(self.log) and self.log[msg["prev_log_index"]][0] == msg["prev_log_term"]
+
+    def update_log_and_state_machine(self, msg: dict):
+        self.log = self.entries_to_log(msg["entries"])
+        if msg["leader_commit"] > self.commitIndex:
+            self.commitIndex = min(msg["leader_commit"], len(self.log))
+            for i in range(self.lastApplied, self.commitIndex):
+                self.log[i][1].apply(self.state_machine)
+                self.lastApplied = self.commitIndex
+
+    def send_append_entries_failure(self, msg: dict):
+        response = self.build_response(msg, "append_entries_response", term=self.current_term, success=False)
+        self.send(response)
+        print(f"Append entries failed: {response}")
+            
+    def log_to_entries(self, log: list[tuple[int, Command]]) -> list[list[str]]:
+        entries = []
+        for term, command in log:
+            entries.append([term, command.serialize()])
+        return entries
+    
+    def entries_to_log(self, entries: list[list[str]]) -> list[tuple[int, Command]]:
+        log = []
+        for term, serialized in entries:
+            if serialized[0] == "GET":
+                log.append((term, GetCommand(serialized[1])))
+            elif serialized[0] == "PUT":
+                log.append((term, PutCommand(serialized[1], serialized[2])))
+        return log
+
+    def start_election(self):
+        self.received_votes = 1
+        self.leader = None
+        self.voted_for = self.id
+        self.election_start = time.time()
+        self.request_vote()
+            
+    
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='run a key-value store')
+    parser.add_argument('port', type=int, help="Port number to communicate")
+    parser.add_argument('id', type=str, help="ID of this replica")
+    parser.add_argument('others', metavar='others', type=str, nargs='+', help="IDs of other replicas")
+    args = parser.parse_args()
+    replica = Replica(args.port, args.id, args.others)
+    replica.run()
