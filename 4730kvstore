@@ -5,13 +5,19 @@ import argparse, socket, time, json, select, struct, sys, math, os
 
 BROADCAST = "FFFF"
 
-if os.path.exists("log.txt"):
-    try:
-        os.remove("log.txt")
-    except FileNotFoundError:
-        pass
+ENABLE_LOG = False
+ENABLE_PROFILING = False
+
+if ENABLE_LOG:
+    if os.path.exists("log.txt"):
+        try:
+            os.remove("log.txt")
+        except FileNotFoundError:
+            pass
 
 def log(message):
+    if not ENABLE_LOG:
+        return
     with open("log.txt", "a+") as f:
         timestamp = time.strftime("%H:%M:%S") + f".{int(time.time() * 1000) % 1000:03d}"
         f.write(f"[{timestamp}] {message}\n")
@@ -65,14 +71,42 @@ class Replica:
     last_applied = 0
     next_index = {}
     match_index = {}
+    unsent_log_entries = [] 
+    
+    def profile(self, message: dict, direction: str):
+        if not ENABLE_PROFILING:
+            return
+        profile_filename = f"profile+{self.id}+{direction}.json"
+        if not os.path.exists(profile_filename):
+            with open(profile_filename, "w") as f:
+                json.dump({}, f)
+        with open(profile_filename, "r+") as f:
+            profile_data = json.load(f)
+        message_type = message["type"]
+        if message_type == "append_entries":
+            message_type = "append_entries" if len(message["entries"]) > 0 else "heartbeat"
+        if message_type not in profile_data:
+            profile_data[message_type] = 0
+        profile_data[message_type] += 1
+        if "total" not in profile_data:
+            profile_data["total"] = 0
+        profile_data["total"] += 1
+        with open(profile_filename, "w") as f:
+            json.dump(profile_data, f)
     
     
     def __init__(self, port: str, id: str, others: list[str]):
+        if ENABLE_PROFILING:
+            if os.path.exists("profile+{self.id}+send.json.txt"):
+                os.remove("profile+{self.id}+send.json.txt")
+            if os.path.exists("profile+{self.id}+receive.json.txt"):
+                os.remove("profile+{self.id}+receive.json.txt")
         # TODO: check if heartbeats are working
         # TODO: check if heartbeats are being sent frequently enough
         # TODO: increase timeout length for leader
-        self.LEADER_TIMEOUT_LENGTH = random.uniform(0.7, 1.3)
-        self.ELECTION_TIMEOUT_LENGTH = random.uniform(0.7, 1.3)
+        self.LEADER_TIMEOUT_LENGTH = 2 + random.uniform(-0.3, 0.3)
+        self.ELECTION_TIMEOUT_LENGTH = 1 + random.uniform(-0.3, 0.3)
+        self.HEARTBEAT_FREQUENCY = 0.5
 
         self.port = port
         self.id = id
@@ -85,6 +119,7 @@ class Replica:
         hello = { "src": self.id, "dst": BROADCAST, "leader": BROADCAST, "type": "hello" }
         self.send(hello)
         print(f"Sent hello message: {hello}")
+        
     
     def run(self):
         while True:
@@ -96,18 +131,20 @@ class Replica:
                 # print(f"Received message '{msg}'")
                 if msg["type"] in ["get", "put", "vote_request", "vote_response", "append_entries", "append_entries_response"]:
                     self.handle_message(msg)
-            if self.leader == self.id and time.time() - self.last_heartbeat > .3:
+            if self.leader == self.id and time.time() - self.last_heartbeat > self.HEARTBEAT_FREQUENCY:
                 self.send_heartbeat()
             if self.voted_for is None and time.time() - self.last_heartbeat > self.LEADER_TIMEOUT_LENGTH:
                 self.current_term += 1
                 self.start_election()
             if self.voted_for == self.id and time.time() - self.election_start > self.ELECTION_TIMEOUT_LENGTH:
                 self.start_election()
-                
+
     def send(self, message):
+        self.profile(message, "send")
         self.socket.sendto(json.dumps(message).encode('utf-8'), ('localhost', self.port))
 
     def handle_message(self, msg):
+        self.profile(msg, "receive")
         if msg["type"] == "vote_request":
             self.handle_request_vote(msg)
         elif msg["type"] == "vote_response":
@@ -116,11 +153,11 @@ class Replica:
             self.handle_append_entries(msg)
         elif msg["type"] == "append_entries_response":
             self.handle_append_entries_ack(msg)
-        elif msg["type"] == "get":
-            self.handle_get(msg)
         elif self.leader == self.id:
             if msg["type"] == "put":
                 self.handle_put(msg)
+            elif msg["type"] == "get":
+                self.handle_get(msg)
             else:
                 raise RuntimeError(f"Unknown message type: {msg['type']}")
         else:
@@ -130,6 +167,8 @@ class Replica:
             return
         
     def handle_get(self, msg):
+        # todo: potential issue - having followers return values is faster but
+        # runs risk of not recognizing there are uncommitted writes on the same key
         for entry in reversed(self.log):
             if entry.index <= self.commit_index:
                 break
@@ -165,7 +204,10 @@ class Replica:
             self.send(response)
             # print(f"Sent put response: {response}")
             # send append entries
-            self.send_append_entries([log_item])
+            self.unsent_log_entries.append(log_item)
+            if len(self.unsent_log_entries) >= 3:
+                self.send_append_entries(self.unsent_log_entries)
+                self.unsent_log_entries = []
             log(f"Replica {self.id} PUT {key} -> {value} [index: {log_item.index}]")
         except Exception as e:
             response = self.build_response(msg, "fail")
