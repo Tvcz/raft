@@ -185,6 +185,13 @@ class Replica:
             # print(f"Sent get response: {response}")
             if value is None:
                 log(f"GET for key [{key}] returned null")
+                for entry in self.log:
+                    if isinstance(entry.command, PutCommand) and entry.command.key == key:
+                        log(f"Null value is in log at index {entry.index}")
+                        log(f"Current commit index is {self.commit_index}")
+                for i in range(1, self.commit_index + 1):
+                    if not any(entry.index == i for entry in self.log):
+                        log(f"Missing log entry at index {i}")
             else: 
                 log(f"Replica {self.id} GET {key} -> {value}")
         except Exception as e:
@@ -314,7 +321,7 @@ class Replica:
         return None
         
     def send_append_entries(self, entries: list[LogEntry]):
-        if entries:
+        if len(entries) > 0:
             before_index = min([entry.index for entry in entries]) - 1
         else:
             before_index = self.get_last_log_index()
@@ -359,7 +366,6 @@ class Replica:
             highest_common_index = sorted(all_indices)[math.ceil(len(all_indices) / 2.0) - 1]
             if highest_common_index > self.commit_index:
                 self.commit_index = highest_common_index
-                log(f"Replica {self.id} committed up to index {self.commit_index}")
                 self.make_commits()
         else:
             if msg["term"] > self.current_term:
@@ -397,20 +403,23 @@ class Replica:
                 if existing_entry and existing_entry.term != entry.term:
                     entries_to_delete_from = min(entries_to_delete_from, entry.index)
                     break
-            self.log = list(filter(lambda entry: entry.index < entries_to_delete_from, self.log))
+            self.log = list(filter(lambda entry: entry.index <= entries_to_delete_from, self.log))
             existing_indices = [entry.index for entry in self.log]
-            self.log += [entry for entry in new_entries if entry.index not in existing_indices]
+            adding_entries = [entry for entry in new_entries if entry.index not in existing_indices]
+            self.log += adding_entries
         if msg["leader_commit"] > self.commit_index:
             if len(new_entries) > 0:
                 self.commit_index = min(msg["leader_commit"], max([entry.index for entry in new_entries]))
             else:
                 self.commit_index = msg["leader_commit"]
             self.make_commits()
+            log(f"Replica {self.id} committed up to index {self.commit_index}")
     
     def make_commits(self):
         for entry in self.log:
             if entry.index > self.last_applied and entry.index <= self.commit_index:
                 entry.command.apply(self.state_machine)
+                log(f"Replica {self.id} applied log entry {entry.index} {entry.command.serialize()}")
         self.last_applied = self.commit_index
 
     def send_append_entries_failure(self, msg: dict):
