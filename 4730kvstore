@@ -193,7 +193,7 @@ class Replica:
                     if not any(entry.index == i for entry in self.log):
                         log(f"Missing log entry at index {i}")
             else: 
-                log(f"Replica {self.id} GET {key} -> {value}")
+                log(f"Replica {self.id} GET {key} -> {value} [MID: {msg['MID']}]")
         except Exception as e:
             response = self.build_response(msg, "fail")
             self.send(response)
@@ -212,10 +212,10 @@ class Replica:
             # print(f"Sent put response: {response}")
             # send append entries
             self.unsent_log_entries.append(log_item)
-            if len(self.unsent_log_entries) >= 2:
+            if len(self.unsent_log_entries) >= 1:
                 self.send_append_entries(self.unsent_log_entries)
                 self.unsent_log_entries = []
-            log(f"Replica {self.id} PUT {key} -> {value} [index: {log_item.index}]")
+            log(f"Replica {self.id} PUT {key} -> {value} [MID: {msg['MID']}, index: {log_item.index}]")
         except Exception as e:
             response = self.build_response(msg, "fail")
             self.send(response)
@@ -312,7 +312,11 @@ class Replica:
         log(f"Replica {self.id} is now the leader")
             
     def send_heartbeat(self):
-        self.send_append_entries([])
+        if len(self.unsent_log_entries) != 0:
+            self.send_append_entries(self.unsent_log_entries)
+            self.unsent_log_entries = []
+        else:
+            self.send_append_entries([])
         
     def get_entry(self, index: int) -> LogEntry:
         for entry in self.log:
