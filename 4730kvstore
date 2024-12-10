@@ -103,9 +103,6 @@ class Replica:
                 os.remove("profile+{self.id}+send.json.txt")
             if os.path.exists("profile+{self.id}+receive.json.txt"):
                 os.remove("profile+{self.id}+receive.json.txt")
-        # TODO: check if heartbeats are working
-        # TODO: check if heartbeats are being sent frequently enough
-        # TODO: increase timeout length for leader
         self.LEADER_TIMEOUT_LENGTH = 3 + random.uniform(-0.5, 0.5)
         self.ELECTION_TIMEOUT_LENGTH = 1 + random.uniform(-0.1, 0.1)
         self.HEARTBEAT_FREQUENCY = 0.3
@@ -131,7 +128,6 @@ class Replica:
                 data: bytes = self.socket.recvfrom(65535)[0]
                 msg = json.loads(data.decode('utf-8'))
 
-                # print(f"Received message '{msg}'")
                 if msg["type"] in ["get", "put", "vote_request", "vote_response", "append_entries", "append_entries_response"]:
                     self.handle_message(msg)
             if self.leader == self.id and time.time() - self.last_heartbeat > self.HEARTBEAT_FREQUENCY:
@@ -168,13 +164,10 @@ class Replica:
         else:
             response = self.build_response(msg, "redirect")
             self.send(response)
-            # print(f"Sent redirect response: {response}")
             return
         
     # Handles GET requests
     def handle_get(self, msg):
-        # todo: potential issue - having followers return values is faster but
-        # runs risk of not recognizing there are uncommitted writes on the same key
         for entry in reversed(self.log):
             if entry.index <= self.commit_index:
                 break
@@ -188,7 +181,6 @@ class Replica:
             value = GetCommand(key).apply(self.state_machine)
             response = self.build_response(msg, "ok", value=value)
             self.send(response)
-            # print(f"Sent get response: {response}")
             if value is None:
                 log(f"GET for key [{key}] returned null")
                 for entry in self.log:
@@ -203,7 +195,6 @@ class Replica:
         except Exception as e:
             response = self.build_response(msg, "fail")
             self.send(response)
-            # print(f"FAILED: {response}")
         
     # Handles PUT requests
     def handle_put(self, msg):
@@ -216,7 +207,6 @@ class Replica:
             # send ack
             response = self.build_response(msg, "ok")
             self.send(response)
-            # print(f"Sent put response: {response}")
             # send append entries
             self.unsent_log_entries.append(log_item)
             if len(self.unsent_log_entries) >= 1:
@@ -226,7 +216,6 @@ class Replica:
         except Exception as e:
             response = self.build_response(msg, "fail")
             self.send(response)
-            # print(f"FAILED: {response}")
             
     # Gets the next log index
     def get_next_log_index(self) -> int:
@@ -259,7 +248,6 @@ class Replica:
         }
         self.send(vote_request)
         log(f"Replica {self.id} sent vote request.")
-        # print(f"Sent vote request: {vote_request}")
         
     # Gets the term of the last log entry
     def get_last_log_term(self):
@@ -303,13 +291,11 @@ class Replica:
     def respond_grant_vote(self, msg: dict):
         vote_response = self.build_response(msg, "vote_response", term=self.current_term, vote_granted=True)
         self.send(vote_response)
-        # print(f"Sent vote response: {vote_response}")
             
     # Responds with a not granted vote
     def respond_not_grant_vote(self, msg: dict):
         vote_response = self.build_response(msg, "vote_response", term=self.current_term, vote_granted=False)
         self.send(vote_response)
-        # print(f"Sent vote response: {vote_response}")
         
     # Handles vote responses
     def handle_vote_response(self, msg: dict):
@@ -463,7 +449,6 @@ class Replica:
     def send_append_entries_failure(self, msg: dict):
         response = self.build_response(msg, "append_entries_response", term=self.current_term, success=False)
         self.send(response)
-        # print(f"Append entries failed: {response}")
             
     # Converts log entries to a list of serialized entries
     def log_to_entries(self, log: list[LogEntry]) -> list[list[str]]:
