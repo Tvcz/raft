@@ -5,7 +5,7 @@ import argparse, socket, time, json, select, struct, sys, math, os
 
 BROADCAST = "FFFF"
 
-ENABLE_LOG = False
+ENABLE_LOG = True
 ENABLE_PROFILING = False
 
 if ENABLE_LOG:
@@ -104,9 +104,9 @@ class Replica:
         # TODO: check if heartbeats are working
         # TODO: check if heartbeats are being sent frequently enough
         # TODO: increase timeout length for leader
-        self.LEADER_TIMEOUT_LENGTH = 2 + random.uniform(-0.3, 0.3)
-        self.ELECTION_TIMEOUT_LENGTH = 1 + random.uniform(-0.3, 0.3)
-        self.HEARTBEAT_FREQUENCY = 0.5
+        self.LEADER_TIMEOUT_LENGTH = 3 + random.uniform(-0.5, 0.5)
+        self.ELECTION_TIMEOUT_LENGTH = 1 + random.uniform(-0.1, 0.1)
+        self.HEARTBEAT_FREQUENCY = 0.3
 
         self.port = port
         self.id = id
@@ -123,7 +123,7 @@ class Replica:
     
     def run(self):
         while True:
-            readable_sockets: tuple[socket.socket] = select.select([self.socket], [], [], 1)[0]
+            readable_sockets: tuple[socket.socket] = select.select([self.socket], [], [], .2)[0]
             if self.socket in readable_sockets:
                 data: bytes = self.socket.recvfrom(65535)[0]
                 msg = json.loads(data.decode('utf-8'))
@@ -262,20 +262,27 @@ class Replica:
         # If request is from an old term, vote against
         if msg["term"] < self.current_term:
             self.respond_not_grant_vote(msg)
+            log(f"Replica {self.id} voted against {msg['candidate_id']} because their term is too old")
             return
         # If already voted for someone else, vote against
         if self.voted_for is not None and self.voted_for != msg["candidate_id"]:
-            self.respond_not_grant_vote(msg)
-            return
+            # But if the old vote is stale, reset electon
+            if time.time() - self.election_start < self.ELECTION_TIMEOUT_LENGTH:
+                self.respond_not_grant_vote(msg)
+                log(f"Replica {self.id} voted against {msg['candidate_id']} because it already voted for {self.voted_for}")
+                return
+            else:
+                self.reset_election_values()
         # If candidate's log is not up to date, vote against
         if (msg["last_log_term"] < self.get_last_log_term()) or \
            (msg["last_log_term"] == self.get_last_log_term() and msg["last_log_index"] < self.get_last_log_index()):
             self.respond_not_grant_vote(msg)
+            log(f"Replica {self.id} voted against {msg['candidate_id']} because their log is not up to date")
             return
         # Otherwise, vote for the candidate
         self.voted_for = msg["candidate_id"]
         self.last_heartbeat = time.time()
-        self.election_start = None
+        self.election_start = time.time()
         self.respond_grant_vote(msg)
         log(f"Replica {self.id} voted for {msg['candidate_id']}")
             
@@ -290,7 +297,7 @@ class Replica:
         # print(f"Sent vote response: {vote_response}")
         
     def handle_vote_response(self, msg: dict):
-        log(f"Replica {self.id} received vote response from {msg['src']}")
+        log(f"Replica {self.id} received {'yay' if msg['vote_granted'] else 'nay'} vote from {msg['src']}")
         if msg["vote_granted"]:
             self.received_votes += 1
             log(f"Replica {self.id} received vote. Current votes: {self.received_votes}")
@@ -299,13 +306,17 @@ class Replica:
         else:
             if msg["term"] > self.current_term:
                 self.current_term = msg["term"]
-                self.election_start = None
-                
-    def become_leader(self):
-        self.leader = self.id
+                self.reset_election_values()
+    
+    def reset_election_values(self):
         self.voted_for = None
         self.election_start = None
         self.received_votes = 0
+
+                
+    def become_leader(self):
+        self.reset_election_values()
+        self.leader = self.id
         self.next_index = {replica: self.get_next_log_index() for replica in self.others}
         self.match_index = {replica: 0 for replica in self.others}
         self.send_heartbeat()
@@ -345,11 +356,10 @@ class Replica:
     
     def handle_append_entries(self, msg: dict):
         if msg["term"] >= self.current_term:
+            self.reset_election_values()
             self.current_term = msg["term"]
             self.leader = msg["leader"]
             self.last_heartbeat = time.time()
-            self.voted_for = None
-            self.election_start = None
             if self.is_log_consistent(msg):
                 self.update_log_and_state_machine(msg)
                 if len(msg["entries"]) != 0:
@@ -375,9 +385,6 @@ class Replica:
             if msg["term"] > self.current_term:
                 self.current_term = msg["term"]
                 self.leader = None
-                self.voted_for = None
-                self.election_start = None
-                self.start_election()
             else:
                 self.next_index[msg["src"]] = max(1, self.next_index[msg["src"]] - 1)
                 log(f"Replica {self.id} decremented next index for {msg['src']} to {self.next_index[msg['src']]}")
