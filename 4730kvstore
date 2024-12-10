@@ -73,6 +73,7 @@ class Replica:
     match_index = {}
     unsent_log_entries = [] 
     
+    # Profiles the message for performance analysis
     def profile(self, message: dict, direction: str):
         if not ENABLE_PROFILING:
             return
@@ -95,6 +96,7 @@ class Replica:
             json.dump(profile_data, f)
     
     
+    # Initializes the replica with the given port, id, and other replicas
     def __init__(self, port: str, id: str, others: list[str]):
         if ENABLE_PROFILING:
             if os.path.exists("profile+{self.id}+send.json.txt"):
@@ -121,6 +123,7 @@ class Replica:
         print(f"Sent hello message: {hello}")
         
     
+    # Main loop to run the replica
     def run(self):
         while True:
             readable_sockets: tuple[socket.socket] = select.select([self.socket], [], [], .2)[0]
@@ -139,10 +142,12 @@ class Replica:
             if self.voted_for == self.id and time.time() - self.election_start > self.ELECTION_TIMEOUT_LENGTH:
                 self.start_election()
 
+    # Sends a message to other replicas
     def send(self, message):
         self.profile(message, "send")
         self.socket.sendto(json.dumps(message).encode('utf-8'), ('localhost', self.port))
 
+    # Handles incoming messages
     def handle_message(self, msg):
         self.profile(msg, "receive")
         if msg["type"] == "vote_request":
@@ -166,6 +171,7 @@ class Replica:
             # print(f"Sent redirect response: {response}")
             return
         
+    # Handles GET requests
     def handle_get(self, msg):
         # todo: potential issue - having followers return values is faster but
         # runs risk of not recognizing there are uncommitted writes on the same key
@@ -199,6 +205,7 @@ class Replica:
             self.send(response)
             # print(f"FAILED: {response}")
         
+    # Handles PUT requests
     def handle_put(self, msg):
         try:
             # add command to log
@@ -221,9 +228,11 @@ class Replica:
             self.send(response)
             # print(f"FAILED: {response}")
             
+    # Gets the next log index
     def get_next_log_index(self) -> int:
         return self.get_last_log_index() + 1
     
+    # Builds a response message
     def build_response(self, msg: dict, type: str, **kwargs):
         response = {
             "src": self.id,
@@ -236,6 +245,7 @@ class Replica:
         response.update(kwargs)
         return response
         
+    # Requests votes from other replicas
     def request_vote(self):
         vote_request = {
             "src": self.id,
@@ -251,13 +261,16 @@ class Replica:
         log(f"Replica {self.id} sent vote request.")
         # print(f"Sent vote request: {vote_request}")
         
+    # Gets the term of the last log entry
     def get_last_log_term(self):
         last_log_index = self.get_last_log_index()
         return self.get_entry(last_log_index).term if last_log_index > 0 else 0
     
+    # Gets the index of the last log entry
     def get_last_log_index(self):
         return max([entry.index for entry in self.log]) if self.log else 0
     
+    # Handles vote requests
     def handle_request_vote(self, msg: dict):
         # If request is from an old term, vote against
         if msg["term"] < self.current_term:
@@ -286,16 +299,19 @@ class Replica:
         self.respond_grant_vote(msg)
         log(f"Replica {self.id} voted for {msg['candidate_id']}")
             
+    # Responds with a granted vote
     def respond_grant_vote(self, msg: dict):
         vote_response = self.build_response(msg, "vote_response", term=self.current_term, vote_granted=True)
         self.send(vote_response)
         # print(f"Sent vote response: {vote_response}")
             
+    # Responds with a not granted vote
     def respond_not_grant_vote(self, msg: dict):
         vote_response = self.build_response(msg, "vote_response", term=self.current_term, vote_granted=False)
         self.send(vote_response)
         # print(f"Sent vote response: {vote_response}")
         
+    # Handles vote responses
     def handle_vote_response(self, msg: dict):
         log(f"Replica {self.id} received {'yay' if msg['vote_granted'] else 'nay'} vote from {msg['src']}")
         if msg["vote_granted"]:
@@ -308,12 +324,14 @@ class Replica:
                 self.current_term = msg["term"]
                 self.reset_election_values()
     
+    # Resets election-related values
     def reset_election_values(self):
         self.voted_for = None
         self.election_start = None
         self.received_votes = 0
 
                 
+    # Becomes the leader
     def become_leader(self):
         self.reset_election_values()
         self.leader = self.id
@@ -322,6 +340,7 @@ class Replica:
         self.send_heartbeat()
         log(f"Replica {self.id} is now the leader")
             
+    # Sends a heartbeat to other replicas
     def send_heartbeat(self):
         if len(self.unsent_log_entries) != 0:
             self.send_append_entries(self.unsent_log_entries)
@@ -329,12 +348,14 @@ class Replica:
         else:
             self.send_append_entries([])
         
+    # Gets a log entry by index
     def get_entry(self, index: int) -> LogEntry:
         for entry in self.log:
             if entry.index == index:
                 return entry
         return None
         
+    # Sends append entries to other replicas
     def send_append_entries(self, entries: list[LogEntry]):
         if len(entries) > 0:
             before_index = min([entry.index for entry in entries]) - 1
@@ -354,6 +375,7 @@ class Replica:
         self.last_heartbeat = time.time()
         self.send(request)
     
+    # Handles append entries requests
     def handle_append_entries(self, msg: dict):
         if msg["term"] >= self.current_term:
             self.reset_election_values()
@@ -371,6 +393,7 @@ class Replica:
             log(f"(Replica {self.id}) Append entries from {msg['src']} failed: term is too old, {msg['term']} < {self.current_term}")
             self.send_append_entries_failure(msg)
             
+    # Handles append entries acknowledgments
     def handle_append_entries_ack(self, msg: dict):
         log(f"Replica {self.id} received append entries ack from {msg['src']}")
         if msg["success"]:
@@ -390,6 +413,7 @@ class Replica:
                 log(f"Replica {self.id} decremented next index for {msg['src']} to {self.next_index[msg['src']]}")
                 self.send_append_entries([entry for entry in self.log if entry.index >= self.next_index[msg["src"]]])
 
+    # Checks if the log is consistent with the given message
     def is_log_consistent(self, msg: dict) -> bool:
         entry_at_prev_index = self.get_entry(msg["prev_log_index"])
         if len(msg["entries"]) == 0:
@@ -405,6 +429,7 @@ class Replica:
             return False
         return True
 
+    # Updates the log and state machine with entries from the given message
     def update_log_and_state_machine(self, msg: dict):
         new_entries = self.entries_to_log(msg["entries"])
         if len(new_entries) != 0:
@@ -426,6 +451,7 @@ class Replica:
             self.make_commits()
             log(f"Replica {self.id} committed up to index {self.commit_index}")
     
+    # Commits pending log entries to the state machine up to the commit index
     def make_commits(self):
         for entry in self.log:
             if entry.index > self.last_applied and entry.index <= self.commit_index:
@@ -433,17 +459,20 @@ class Replica:
                 log(f"Replica {self.id} applied log entry {entry.index} {entry.command.serialize()}")
         self.last_applied = self.commit_index
 
+    # Sends a failure response for append entries
     def send_append_entries_failure(self, msg: dict):
         response = self.build_response(msg, "append_entries_response", term=self.current_term, success=False)
         self.send(response)
         # print(f"Append entries failed: {response}")
             
+    # Converts log entries to a list of serialized entries
     def log_to_entries(self, log: list[LogEntry]) -> list[list[str]]:
         entries = []
         for entry in log:
             entries.append([entry.index, entry.term, entry.command.serialize()])
         return entries
     
+    # Converts a list of serialized entries to log entries
     def entries_to_log(self, entries: list[list[str]]) -> list[LogEntry]:
         log = []
         for index, term, serialized in entries:
@@ -453,6 +482,7 @@ class Replica:
                 log.append(LogEntry(index, term, PutCommand(serialized[1], serialized[2])))
         return log
 
+    # Starts an election
     def start_election(self):
         self.received_votes = 1
         self.leader = None
