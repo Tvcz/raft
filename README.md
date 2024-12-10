@@ -1,9 +1,5 @@
 # Distributed Datastore
-## Project 2 - Key-Value Store with Raft Consensus
-- Implements raft consensus algorithm
-- For reads of data which have uncommitted writes, the read is blocked until the
-  write is committed (this is done using redirects)
-
+## Project 4 - Key-Value Store Final Project
 ## High-Level Approach
 For this project, functionality was implemented in the `Replica` and `LogEntry` classes. These are defined and instantiated in the `4730kvstore` file.
 
