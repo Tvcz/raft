@@ -103,8 +103,8 @@ class Replica:
                 os.remove("profile+{self.id}+send.json.txt")
             if os.path.exists("profile+{self.id}+receive.json.txt"):
                 os.remove("profile+{self.id}+receive.json.txt")
-        self.LEADER_TIMEOUT_LENGTH = 2 + random.uniform(-0.5, 0.5)
-        self.ELECTION_TIMEOUT_LENGTH = 1 + random.uniform(-0.1, 0.1)
+        self.LEADER_TIMEOUT_LENGTH = 1 + random.uniform(-0.5, 0.5)
+        self.ELECTION_TIMEOUT_LENGTH = .5 + random.uniform(-0.1, 0.1)
         self.HEARTBEAT_FREQUENCY = 0.3
 
         self.port = port
