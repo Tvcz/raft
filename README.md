@@ -1,5 +1,7 @@
 # Distributed Datastore
-## Project 4 - Key-Value Store Final Project
+
+This project was submitted as my final project for my Fall 2024 Distributed Systems class.
+
 ## High-Level Approach
 For this project, functionality was implemented in the `Replica` and `LogEntry` classes. These are defined and instantiated in the `4730kvstore` file.
 
